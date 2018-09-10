@@ -1,6 +1,6 @@
 # Code to run Wright-Fisher simulations with given parameters, bin the 
 # output into bins akin to those used in diachronic text corpora,
-# and apply the FIT (Feder et al. 2013), following Newberry et al. (2017).
+# and apply the FIT (Feder et al. 2014), following Newberry et al. (2017).
 # 
 # Code: Andres Karjus
 
@@ -12,7 +12,7 @@ enableJIT(3)
 
 ##### Functions ####
 FITfast = function(af.vec){
-  # based on p.c. with authors
+  # based on p.c. with author
   tp.vec = (1:length(af.vec))
   if(sum(af.vec >= 1 | af.vec <= 0)){ 
     # warning(paste("min, max values are", min(af.vec), max(af.vec), ", must be in (0,1), force-fixing" ))
