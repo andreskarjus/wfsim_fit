@@ -41,8 +41,8 @@ wfsim = function(s,         # selection coefficient (e.g., 0, 0.1)
 }
 
 
-dofitm = function(N=1000, start=500, reps=100, maxs=5, gens=200){
-  ss = c(0,exp(seq(log(0.01), log(maxs), length.out = gens-1)))
+dofitm = function(N=1000, start=500, reps=100, maxs=5, gens=200, ns=200){
+  ss = c(0,exp(seq(log(0.01), log(maxs), length.out = ns-1)))
   maxlen = round(median(table(cut(1:gens, 3)))) # length of bin if minimal n bins
   nx= (1:maxlen)[!duplicated((sapply(1:maxlen, function(x) length(seq(1,gens,x)))))]   # bin lengths
   nbins = sapply(nx, function(x) length(seq(1,gens, x) ))
@@ -56,7 +56,7 @@ dofitm = function(N=1000, start=500, reps=100, maxs=5, gens=200){
         #try({
         j = wfsim(s=ss[s], N=N, start=start, len=gens)
         j = data.frame(j=j, year=1:gens)
-        if(n<gens){
+        if(n < gens){ # if n bins == n gens, then no binning to apply
           sum.df = j %>% group_by(cut(year, nbins[n])
           ) %>% summarize(value=sum(j), count=n())
           xlin = (sum.df$value / sum.df$count)/N
@@ -89,8 +89,9 @@ dofitm = function(N=1000, start=500, reps=100, maxs=5, gens=200){
 # This is the space of s values explored by default: c(0, exp(seq(log(0.01), log(5), length.out = 200-1))
 
 Sys.time() # running these might take a while
-fitm1 = dofitm(N=1000, start=500, reps=100, maxs=5, gens=200) # starting at 50%
-fitm2 = dofitm(N=1000, start=50, reps=100, maxs=5, gens=200)  # starting at 5%
+# N = pop size; start = mutant starting n; reps = how many replications of each combo; maxs = largest s value to test; gens=how many generations (~years in a corpus); ns = how many s values to test (taken from a log sequence by default, starting with log(0.01), with s=0 added to the start)
+fitm1 = dofitm(N=1000, start=500, reps=100, maxs=5, gens=200,ns=200) # starting at 50%
+fitm2 = dofitm(N=1000, start=50, reps=100, maxs=5, gens=200,ns=200)  # starting at 5%
 Sys.time()
 
 
