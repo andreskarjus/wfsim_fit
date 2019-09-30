@@ -8,13 +8,13 @@
 
 # Required packages
 library(dplyr)    
-library(RColorBrewer) # just for plot colors
+library(nortest)
 library(compiler)     # recommended: speeds up loops using JIT compilation
 enableJIT(3)
 
-##### Functions ####
 
-FITfast = function(af.vec){
+
+FITfast = function(af.vec, alltests=T){
   tp.vec = (1:length(af.vec)) # all values present here, no gaps in time
   if(sum(af.vec >= 1 | af.vec <= 0)){ 
     # warning(paste("min, max values are", min(af.vec), max(af.vec), ", must be in (0,1), force-fixing" ))
@@ -25,9 +25,13 @@ FITfast = function(af.vec){
   Yi <- Yi[!is.na(Yi)]
   fitp = t.test(Yi)$p.value
   swp = shapiro.test(Yi)$p.value
-  #kolm =  ks.test(Yi,"pnorm")$p.value # kolmogorov-smirnov test
-  if(length(Yi)>4){ kolm = lillie.test(Yi)$p.value} else {kolm=NA} # Lilliefors (Kolmogorov-Smirnov) test for the composite hypothesis of normality
-  if(length(Yi)>7){ad = ad.test(Yi)$p.value} else { ad=NA } # Anderson-Darling test, min 8
+  if(alltests){
+    if(length(Yi)>4){ kolm = lillie.test(Yi)$p.value} else {kolm=NA} # Lilliefors (Kolmogorov-Smirnov) test for the composite hypothesis of normality
+    if(length(Yi)>7){ad = ad.test(Yi)$p.value} else { ad=NA } # Anderson-Darling test, min 8
+  } else {
+    kolm=0;ad=0
+  }
+  
   return( list(fitp=fitp, swp=swp, kolm=kolm, ad=ad) )
 }
 
@@ -45,14 +49,15 @@ wfsim = function(s,         # selection coefficient (e.g., 0, 0.1)
     # (floating point errors, need to take care with min() so prob is <=1)
   }
   return(j) # returns the series
-}
+}; wfsim=cmpfun(wfsim,options=list(optimize=3))
 
 
-dofitm = function(N=1000, start=500, reps=100, maxs=5, gens=200,ns=200){
+dofitm = function(N=1000, start=500, reps=1000, maxs=5, gens=200,ns=200, minshare=10){
   ss = c(0,exp(seq(log(0.001), log(maxs), length.out = ns-1)))
   maxlen = round(median(table(cut(1:gens, 4)))) # length of bin if minimal n bins
   nx= (1:maxlen)[!duplicated((sapply(1:maxlen, function(x) length(seq(1,gens,x)))))]   # bin lengths, 25
   nbins = sapply(nx, function(x) length(seq(1,gens, x) )) # 25
+  minper = reps/minshare
   
   fitm = matrix(NA, length(ss), length(nbins), dimnames=list(as.character(ss), as.character(nbins)))
   swm  = matrix(NA, length(ss), length(nbins), dimnames=list(as.character(ss), as.character(nbins)))
@@ -78,7 +83,8 @@ dofitm = function(N=1000, start=500, reps=100, maxs=5, gens=200,ns=200){
         } else { # if nothing to bin
           xlin=j$j/N
         }
-        tmp = FITfast(xlin)  # FIT function fixes 0,1 events by making them +-0.01 from the boundary
+        tmp = FITfast(xlin, alltests = F)  
+        # FIT function fixes 0,1 events by making them +-0.001 from the boundary (with N=1000, it's basically +-1)
         #})
         rmvec[rp]  = tmp$fitp
         swvec[rp]  = tmp$swp
@@ -94,71 +100,270 @@ dofitm = function(N=1000, start=500, reps=100, maxs=5, gens=200,ns=200){
       
       rmvec[swvec<0.1] = NA # set to NA if normality assumption violated
       # record after filtering:
-      fitswm[s,n] = mean(rmvec, na.rm=T)   #  mean FIT p-value, but sw-filtered (so if all NA then NA!)
-      fitratioswm[s,n] = length(which(rmvec<0.05))/length(which(!is.na(rmvec)))
+      if(length(which(!is.na(rmvec))) < minper ){  # if too few valid reps, then don't calculate % & mean
+        fitswm[s,n] = NA
+        fitratioswm[s,n] = NA
+      } else {
+        fitswm[s,n] = mean(rmvec, na.rm=T)   #  mean FIT p-value, but sw-filtered (so if all NA then NA!)
+        fitratioswm[s,n] = length(which(rmvec<0.05))/length(which(!is.na(rmvec)))
+      }
     }
     cat(".")
   }
   return(list(fitm=fitm, nx=nx, nbins=nbins, fitratio = fitratio, swm=swm, fitswm = fitswm,fitratioswm=fitratioswm, kolmm=kolmm, adm=adm))
 }
 
-#### Run ####
 
 
-# The following calls both return a list with 4 elements:
+#### Time series length and selection strength for appendix ####
+
+dofitm_lengths = function(N=1000, start=500, reps=1000, maxs=5, lens=4:200,ns=200, minshare=10){
+  ss = c(0,exp(seq(log(0.001), log(maxs), length.out = ns-1)))
+  minper=reps/minshare
+  fitratio = matrix(NA, length(ss), length(lens), dimnames=list(as.character(ss), as.character(lens)))
+  fitratioswm = matrix(NA, length(ss), length(lens), dimnames=list(as.character(ss), as.character(lens)))
+  
+  for(n in seq_along(lens)){
+    for(s in seq_along(ss)){
+      rmvec = rep(NA,reps)
+      swvec = rep(NA,reps)
+      for(rp in 1:reps){ 
+        j = wfsim(s=ss[s], N=N, start=start, len=lens[n]) # difference here
+        try({ # once got  Error in shapiro.test(Yi) : all 'x' values are identical for 4-length
+          tmp = FITfast(j/N, alltests = F)  
+          rmvec[rp]  = tmp$fitp
+          swvec[rp]  = tmp$swp
+        })
+      }
+      
+      fitratio[s,n] = length(which(rmvec<0.05))/length(which(!is.na(rmvec)))
+      # filter:
+      rmvec[swvec<0.1] = NA # set to NA if normality assumption violated
+      # record after filtering:
+      if(length(which(!is.na(rmvec))) < minper ){  # if too few valid reps, then don't calculate % & mean
+        fitratioswm[s,n] = NA
+      } else {
+        fitratioswm[s,n] = length(which(rmvec<0.05))/length(which(!is.na(rmvec)))
+      }
+    }
+    cat(".")
+  }
+  return(list(lens=lens, fitratio = fitratio, fitratioswm=fitratioswm))
+}
+
+
+
+#### run ####
+# running these might take a while
+
+Sys.time()
+fitm1 = dofitm(N=1000, start=500, reps=1000, maxs=5, gens = 200, ns = 200)
+Sys.time()
+fitm2 = dofitm(N=1000, start=50, reps=1000, maxs=5, gens=200, ns=200)
+Sys.time()
+
+
+
+#### run length model ####
+lens=unique(round(exp(seq(log(4), log(200), length.out = 200))))
+Sys.time()
+fitm1_len = dofitm_lengths(N=1000, start=500, reps=1000, maxs=5, lens = lens, ns = 100)
+Sys.time()
+fitm2_len = dofitm_lengths(N=1000, start=50, reps=1000, maxs=5, lens= lens, ns=100)
+Sys.time()
+
+
+# The calls both return a list with these elements:
 # [[1]] the matrix of FIT mean p-values, across 200 s-values (rows) and 26 increasing bin lengths/decreasing numbers of bins (columns)
 # [[2]] the bin lenghts
 # [[3]] the number of bins for each bin length
-# [[4]] another matrix: over 100 replicates of each combination, % of FIT p<0.05
-# This is the space of s values explored by default: c(0, exp(seq(log(0.01), log(5), length.out = 200-1))
+# [[4]] another matrix: over 1000 replicates of each combination, % of FIT p<0.05
+# [[5]] Shapiro-Wilk p
+# [[6]] same as 1, but with SW p<0.1 cases removed before calculating mean
+# [[7]] same as 1, but with SW p<0.1 cases removed before calculating %
 
-Sys.time() # running these might take a while
+# This is the space of s values explored by default: c(0, exp(seq(log(0.001), log(5), length.out = 200-1))
+
 # N = pop size; start = mutant starting n; reps = how many replications of each combo; maxs = largest s value to test; gens=how many generations (~years in a corpus); ns = how many s values to test (taken from a log sequence by default, starting with log(0.001), with s=0 prepended to the start)
-fitm1 = dofitm(N=1000, start=500, reps=100, maxs=5, gens = 200, ns = 200)
-Sys.time()
-fitm2 = dofitm(N=1000, start=50, reps=100, maxs=5, gens=200, ns=200)
-Sys.time()
 
 
-#### Some quick plots ####
-par(mfrow=c(3,2), mar=c(3,3,1,1))
-# Space of selection strength values s explored:
-plot( c(0, exp(seq(log(0.001), log(5), length.out = 200-1))), ylab="s", cex=0.5 )
 
-# 50% start, 3 example slices
-desat = function(cols, sat=0.5) {
-  x = diag(c(1, sat, 1)) %*% rgb2hsv(col2rgb(cols))
-  hsv(x[1,], x[2,], x[3,])
+
+#### plotting  ####
+
+library(ggplot2)
+library(viridisLite)
+library(RColorBrewer)
+library(cowplot)
+library(dplyr)
+library(reshape2)
+
+
+thm = theme(
+  panel.border = element_rect(color="darkgray",fill=NA), 
+  legend.background = element_rect(fill="white", color=NA),
+  legend.box.spacing = unit(0,"mm"),
+  legend.box.margin = margin(0,0,0,0),
+  axis.ticks= element_line(color="darkgray", size = 0.1), 
+  axis.ticks.length = unit(-1.4, "mm"), 
+  axis.text.x = element_text(margin=unit(c(t = 2, r = 0, b = 0, l = 0),"mm")),
+  axis.text.y.left = element_text(margin=unit(c(t = 0, r = 2, b = 0, l = 0),"mm"))
+)
+
+
+figure4 = function(fitm2, swm=F, ratio=F, lenplot=F, legend=T, theme=thm, lines=NULL) {
+  sx=as.numeric(rownames(fitm2$fitratio)); 
+  sb = sapply(c(0,0.01,0.1,1:5), function(x) mean(which(abs(sx-x)==min(abs(sx-x)))) )
+  atsmall=sort(union(sb,sapply(c(
+    seq(0,0.01,0.001),
+    seq(0.01,0.1,0.01),
+    seq(0.1,1,0.1)
+  ), function(x) which(abs(sx-x)==min(abs(sx-x)))[1] )))
+  sl=rep("",length(atsmall));sl[which(atsmall %in%sb)]=c(0,0.01,0.1,1:5)
+  if(legend) lp = c(0.98,0.98)
+  if(!legend) lp = "none"
+  tickcol="black"
+  ticksize=0.1
+  rectcol = rgb(0.95,0.95,0.95,0.5)
+  
+  thm = theme + theme(
+    axis.ticks= element_line(color=tickcol, size = 0.1),
+    panel.grid = element_line(color="grey90", size=0.1),
+    legend.position = lp, 
+    legend.justification = c(1,1), 
+    legend.background = element_rect(fill=rgb(1,1,1,0.8), color=NA), 
+    legend.margin=margin(c(0,0,0,0)) )
+  
+  ylb = ifelse(lenplot, "length (n generations)", "number of bins")
+  
+  if(ratio){
+    if(swm) d = fitm2$fitratioswm
+    if(!swm) d = fitm2$fitratio
+    slabs = 1:nrow(d)
+    ylabslen=1:ncol(d)
+    
+    cols = c(viridis(5, end=0.4)[1], plasma(5, begin=0.5,end = 1, direction = 1), viridis(5, begin=0.55,end=1,  direction=-1)) #; plot(1:11, col=cols, pch=20, cex=5)
+    labs=paste0("\u2264", c(0.05,seq(0.1,1, 0.1))*100)
+    d = d %>% reshape2::melt(varnames=c("s", "nbins")) %>%  
+      mutate(value=cut(value, breaks=c(0,0.05, seq(0.1,1, 0.1)),labels=labs,include.lowest = T)) %>%  
+      mutate(s=factor(s, labels=slabs))
+    if(!lenplot){
+      d = d %>% mutate(nbins=factor(nbins, levels=rev(levels(as.factor(nbins)))))
+    } else {
+      d = d %>% mutate(nbins=factor(nbins, labels = ylabslen))
+    }
+    
+    fig = ggplot(d, aes(y = nbins, x = s, fill = value)) +
+      geom_tile(color=NA)+
+      theme_minimal() +
+      scale_fill_manual(values= cols, na.value=NA, drop=F, name= "% p<0.05", labels=labs, na.translate = F) +
+      scale_x_discrete(expand=c(0,0), breaks=atsmall, labels=sl) +
+      labs(x="selection strength parameter",  y=ylb) 
+    #geom_vline(xintercept = 0.01, color="black") +
+    
+    if(!lenplot){
+      fig = fig +
+        scale_y_discrete(expand=c(0,0), position="left") +
+        #geom_rect(mapping =  aes(xmin=0.9,xmax=98,  ymin=16,ymax=23), inherit.aes = F, color=rgb(1,1,1,0.5), fill=NA) +
+        # white rectangle:
+        annotate("segment", x=0.8, xend=98, y=16-0.4, yend=16-0.4, color=rectcol)+
+        annotate("segment", x=0.8, xend=98, y=23+0.4, yend=23+0.4, color=rectcol) +
+        annotate("segment", x=98.4, xend=98.4, y=16-0.2, yend=23+0.2, color=rectcol) +
+        
+        # ticks
+        annotate("segment", x=199, y=1:25, yend=1:25,xend=200.5, color=tickcol, size=ticksize ) +        # right side ticks
+        annotate("segment", x=atsmall, y=25.5, yend=25.2,xend=atsmall, color=tickcol, size=ticksize ) +  # topside ticks
+        annotate("segment", x=atsmall[which(sl!="")], y=0.5, yend=1.1,xend=atsmall[which(sl!="")] , color=tickcol, size=ticksize )  # logticks
+      if(!is.null(lines)) fig=fig+annotate("segment", x=c(lines), xend=c(lines), y=1.3, yend=25, color=rgb(0,0,0,0.4))  # example lines
+    }
+    if(lenplot){
+      lx = unique(round(exp(seq(log(4), log(200), length.out = 200))))
+      atsmall2 = sapply(c(
+        4:10,
+        seq(20,200,10)
+      ), function(x) (which(abs(lx-x)==min(abs(lx-x))) )[1])
+      atbig = sapply(c(4, 10,20,50,100,200), function(x) (which(abs(lx-x)==min(abs(lx-x))) )[1])
+      
+      fig=fig+
+        annotate("segment", x=100, y=atsmall2, yend=atsmall2,xend=100.5, color=tickcol, size=ticksize) +        # right side ticks
+        annotate("segment", x=atsmall, y=118.5, yend=118.2,xend=atsmall, color=tickcol, size=ticksize) +  # topside ticks
+        annotate("segment", x=0.5, y=atsmall2, yend=atsmall2,xend=1.2, color=tickcol, size=ticksize ) +  # left logticks
+        annotate("segment", x=0.5, y=atbig, yend=atbig,xend=1.8, color=tickcol, size=ticksize ) +  # left big logticks
+        annotate("segment", x=99.5, y=atbig, yend=atbig,xend=100.5, color=tickcol, size=ticksize ) +  # right big logticks
+        annotate("segment", x=atsmall[which(sl!="")], y=0.5, yend=2.1,xend=atsmall[which(sl!="")], color=tickcol, size=ticksize ) +  # logticks
+        geom_vline(xintercept = 55 ,alpha=0.5, ) + geom_hline(yintercept = 47, alpha=0.5) +
+        scale_y_discrete(expand=c(0,0), position="left", breaks=(atbig), labels = c(4, 10,20,50,100,200)  )
+      #scale_y_discrete(expand=c(0,0), position="left", breaks=1, labels = "!!!!!!!!!!!") 
+      #+ annotate("text", x=2,y=1:47,label=1:47, size=3, color="white")
+    }
+    fig=fig+thm
+  }
+  
+  if(!ratio){
+    if(swm) d = fitm2$fitswm
+    if(!swm) d = fitm2$fitm
+    
+    cols = RColorBrewer::brewer.pal(5, "RdYlBu")
+    labs=c("<0.01", "<0.05", "<0.1", "<0.2", "\u2265 0.2")
+    fig =
+      d %>% reshape2::melt(varnames=c("s", "nbins")) %>% mutate(value=cut(value, breaks=c(0,0.01,0.05, 0.1,0.2,1),include.lowest = T, right=F)) %>% 
+      mutate(s=factor(s, labels=1:200)) %>% 
+      mutate(nbins=factor(ceiling(200/nbins))) %>%  # levels=rev(levels(as.factor(nbins))))) %>%  # right-excluding for <0.05 etc
+      
+      ggplot(aes(y = nbins, x = s, fill = value)) +
+      geom_tile(color=NA)+
+      theme_minimal() +
+      scale_fill_manual(values= cols, na.value=NA, drop=F, name= "mean p", labels=labs,na.translate = F) +
+      scale_y_discrete(expand=c(0,0), position="right") + # sec.axis = sec_axis(~as.numeric(.)/200, name="bin length"))+
+      scale_x_discrete(expand=c(0,0), breaks=atsmall, labels=sl)+
+      theme(axis.ticks= element_line(), 
+            axis.ticks.length = unit(-1.4, "mm"), 
+            axis.text.x = element_text(margin=unit(c(t = 2, r = 0, b = 0, l = 0),"mm")),
+            axis.text.y.right = element_text(margin=unit(c(t = 0, r = 1, b = 0, l = 2),"mm"))
+      ) + thm +
+      labs(x="selection strength parameter",  y="bin length") +
+      
+      #geom_rect(mapping =  aes(xmin=0.9,xmax=98,  ymin=16,ymax=23), inherit.aes = F, color=rgb(1,1,1,0.5), fill=NA) +
+      # white rectangle:
+      annotate("segment", x=0.8, xend=98, y=16-0.4, yend=16-0.4, color=rectcol)+
+      annotate("segment", x=0.8, xend=98, y=23+0.4, yend=23+0.4, color=rectcol) +
+      annotate("segment", x=98.4, xend=98.4, y=16-0.2, yend=23+0.2, color=rectcol) +
+      
+      # ticks
+      annotate("segment", x=0,5, y=1:25, yend=1:25,xend=1.5, color=tickcol, size=ticksize ) + # ! left side ticks
+      annotate("segment", x=atsmall, y=25.5, yend=25.2,xend=atsmall, color=tickcol, size=ticksize ) +  # topside
+      annotate("segment", x=atsmall[which(sl!="")], y=0.5, yend=1.1,xend=atsmall[which(sl!="")] , 
+               color=tickcol, size=ticksize )  # logticks
+    if(!is.null(lines)) fig=fig+annotate("segment", x=c(lines), xend=c(lines), y=1.3, yend=25, color=rgb(0,0,0,0.4))  # example lines
+  }
+  return(fig)
 }
-plot(NA, ylim=c(-0.001,0.3), xlim=c(1,25), xlab="", ylab="",yaxs="i", xaxt="n", yaxt="n")
-cols = desat(RColorBrewer::brewer.pal(5, "RdYlBu"))
-for(i in 1:5){
-  rect(0, c(-0.001, 0.01,0.05, 0.1, 0.2)[i], 27,0.4, col= cols[i],border=NA )
-}
-axis(1, at = 1:25, labels = fitm1$nbins, las=1) # n bins
-axis(2, at = c(0.01,0.05,0.1,0.2,0.3), labels=c(0.01,0.05,"0.1","0.2","0.3"), las=1) # pval
-pc=c(1,4,17); p=1 
-sx = as.numeric(rownames(fitm1[[1]]))
-x3  = sapply(c(0.01,0.02,0.1), function(x) which(abs(sx-x)==min(abs(sx-x)))[1] )
-for(i in x3){ # 0.0102 0.0203 0.0998
-  lines(1:25,fitm1[[1]][i,], type="b", cex=0.8, lwd=1, pch=pc[p])
-  p=p+1
-}
-legend(x=0, y=0.3, legend = c("s=0.1","s=0.02", "s=0.01"), border=NULL, bg=NA,bty = "n", pch=rev(pc)); mtext("number of bins",1, 2.1, cex=m); mtext(expression("Mean FIT "~italic(p)*"-value"),2, 2,cex=0.8)
 
 
 
-# Full heatmaps
-par(mar=c(1,1,1,1))
-# 50% start, power:
-image((fitm1[[4]]), breaks=seq(-0.00001,1, length.out = 1000), col=gray.colors(999, start=1,end=0), xaxt="n",yaxt="n")
-# 50% start, FIT means:
-image((fitm1[[1]]),breaks=c(-1,0.01,0.05,0.1,0.2,1), col=RColorBrewer::brewer.pal(5, "RdYlBu"), xaxt="n",yaxt="n")
-# # 5% start, power:
-image((fitm2[[4]]), breaks=seq(-0.00001,1, length.out = 1000), col=gray.colors(999, start=1,end=0), xaxt="n",yaxt="n")
-# 5% start, FIT means:
-image((fitm2[[1]]),breaks=c(-1,0.01,0.05,0.1,0.2,1), col=RColorBrewer::brewer.pal(5, "RdYlBu"), xaxt="n",yaxt="n")
-mtext(text="<- low s   high s ->", outer=T,side = 1, line=-1)
-mtext(text="<- many short bins   few long bins -> ", outer=T,side = 2, line=-1)
+# figure 4 (50%)
+plot_grid(figure4(fitm1, swm=F, ratio=T, lines=56),
+          figure4(fitm1, swm=F, ratio=F, lines=56),
+          figure4(fitm1, swm=T, ratio=T, lines=56),
+          figure4(fitm1, swm=T, ratio=F, lines=56), 
+          ncol=2, labels = c("a.1", "b.1", "a.2", "b.2"), label_y = 0.99, label_x = -0.008 )
+
+# figure 6 (4.2) 5%
+plot_grid(figure4(fitm2, swm=F, ratio=T, lines=88),
+          figure4(fitm2, swm=F, ratio=F, lines=88),
+          figure4(fitm2, swm=T, ratio=T, lines=88),
+          figure4(fitm2, swm=T, ratio=F, lines=88), 
+          ncol=2, labels = c("a.1", "b.1", "a.2", "b.2"), label_y = 0.99,  label_x = -0.008 )
+
+# figure, S supplement for lengths
+plot_grid(figure4(fitm2_len, swm=F, ratio=T, lenplot = T, legend=F),
+          figure4(fitm1_len, swm=F, ratio=T,lenplot = T, legend=F),
+          figure4(fitm2_len, swm=T, ratio=T,lenplot = T,  legend=F),
+          figure4(fitm1_len, swm=T, ratio=T, lenplot = T, legend=T), 
+          ncol=2, labels = c("a.1 (5%) ", "b.1 (50%)", "a.2 (5%) ", "b.2 (50%)"), label_y = 0.99, label_x = 0.08 )
+
+
+
+
 
 
